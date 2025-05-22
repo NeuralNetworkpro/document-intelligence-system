@@ -1,2 +1,4 @@
 streamlit
 mistralai
+pymupdf==1.23.3
+pillow

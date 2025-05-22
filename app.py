@@ -9,6 +9,13 @@ import re
 from mistralai import Mistral
 from PIL import Image
 
+# Try to import PyMuPDF for PDF preview
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+
 # Function to load and encode the logo
 def get_logo_base64():
     # Path to your logo file - adjust this to where you save the logo
@@ -20,6 +27,36 @@ def get_logo_base64():
             encoded_logo = base64.b64encode(logo_data).decode()
             return encoded_logo
     return None
+
+# Function to render PDF pages as images
+def render_pdf_preview(pdf_bytes, max_pages=3):
+    """Render the first few pages of a PDF as images."""
+    if not PYMUPDF_AVAILABLE:
+        return None
+    
+    try:
+        # Create a memory buffer from the PDF bytes
+        memory_buffer = io.BytesIO(pdf_bytes)
+        
+        # Open the PDF from the memory buffer
+        doc = fitz.open(stream=memory_buffer, filetype="pdf")
+        
+        # Limit the number of pages to render
+        page_count = min(doc.page_count, max_pages)
+        
+        images = []
+        for page_num in range(page_count):
+            page = doc.load_page(page_num)
+            # Render page to an image (higher resolution)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img_data = pix.tobytes("png")
+            images.append(img_data)
+        
+        doc.close()
+        return images
+    except Exception as e:
+        st.error(f"Error rendering PDF preview: {e}")
+        return None
 
 # Page configuration with improved styling
 st.set_page_config(
@@ -98,6 +135,18 @@ st.markdown("""
         width: 150px;
         height: auto;
     }
+    .pdf-info {
+        background-color: #f8f9fa;
+        border-left: 5px solid #4F8BF9;
+        padding: 1rem;
+        border-radius: 5px;
+        margin-bottom: 1rem;
+    }
+    .page-caption {
+        text-align: center;
+        font-weight: bold;
+        margin-bottom: 0.5rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,6 +183,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = {}
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "ocr"
+if "pdf_bytes" not in st.session_state:
+    st.session_state.pdf_bytes = []
 
 # Function to clean API key
 def clean_api_key(api_key):
@@ -195,6 +246,7 @@ else:
                 st.session_state.preview_sources = []
                 st.session_state.file_names = []
                 st.session_state.chat_history = {}
+                st.session_state.pdf_bytes = []
                 
                 url_list = [url.strip() for url in urls.split("\n") if url.strip()]
                 
@@ -228,6 +280,7 @@ else:
                             st.session_state.preview_sources.append(url)
                             st.session_state.file_names.append(os.path.basename(url))
                             st.session_state.chat_history[doc_id] = []
+                            st.session_state.pdf_bytes.append(None)  # No PDF bytes for URL
                         
                         except Exception as e:
                             st.error(f"Error processing {url}: {str(e)}")
@@ -249,6 +302,7 @@ else:
                 st.session_state.preview_sources = []
                 st.session_state.file_names = []
                 st.session_state.chat_history = {}
+                st.session_state.pdf_bytes = []
                 
                 with st.spinner("Processing documents..."):
                     for uploaded_file in uploaded_files:
@@ -283,6 +337,9 @@ else:
                                     # For preview, create a data URL
                                     encoded_file = base64.b64encode(file_content).decode("utf-8")
                                     preview_url = f"data:application/pdf;base64,{encoded_file}"
+                                    
+                                    # Store the original PDF bytes for preview and download
+                                    st.session_state.pdf_bytes.append(file_content)
                                 finally:
                                     # Clean up temporary file
                                     if os.path.exists(temp_path):
@@ -294,6 +351,7 @@ else:
                                 data_url = f"data:{mime_type};base64,{encoded_file}"
                                 document = {"type": "image_url", "image_url": data_url}
                                 preview_url = data_url
+                                st.session_state.pdf_bytes.append(None)  # No PDF bytes for image
                             
                             # Process with Mistral OCR
                             ocr_response = client.ocr.process(
@@ -352,11 +410,59 @@ else:
                     
                     preview_src = st.session_state.preview_sources[idx]
                     
-                    # Display PDF or image based on content type
+                    # UPDATED: Modified PDF display to show actual preview
                     if "application/pdf" in preview_src or preview_src.lower().endswith(".pdf"):
-                        pdf_embed_html = f'<iframe src="{preview_src}" width="100%" height="600" frameborder="0"></iframe>'
-                        st.markdown(pdf_embed_html, unsafe_allow_html=True)
+                        # For PDFs, render pages as images
+                        pdf_bytes = None
+                        
+                        # If we have the PDF bytes stored
+                        if idx < len(st.session_state.pdf_bytes) and st.session_state.pdf_bytes[idx] is not None:
+                            pdf_bytes = st.session_state.pdf_bytes[idx]
+                        # For data URLs
+                        elif preview_src.startswith("data:"):
+                            try:
+                                # Extract base64 content from data URL
+                                base64_content = preview_src.split(",")[1]
+                                pdf_bytes = base64.b64decode(base64_content)
+                            except Exception as e:
+                                st.error(f"Error extracting PDF content: {e}")
+                        
+                        # Render PDF preview if we have the bytes
+                        if pdf_bytes:
+                            # Provide download button
+                            st.download_button(
+                                label="Download PDF",
+                                data=pdf_bytes,
+                                file_name=st.session_state.file_names[idx],
+                                mime="application/pdf",
+                                key=f"download_pdf_preview_{idx}"
+                            )
+                            
+                            # Render PDF pages as images
+                            if PYMUPDF_AVAILABLE:
+                                with st.spinner("Rendering PDF preview..."):
+                                    page_images = render_pdf_preview(pdf_bytes)
+                                    
+                                    if page_images:
+                                        for i, img_data in enumerate(page_images):
+                                            st.markdown(f"<p class='page-caption'>Page {i+1}</p>", unsafe_allow_html=True)
+                                            st.image(img_data, use_column_width=True)
+                                    else:
+                                        st.warning("Could not render PDF preview.")
+                            else:
+                                st.info("Install PyMuPDF for PDF preview: pip install pymupdf")
+                                st.warning("PDF preview is not available. Please download the file to view it.")
+                                # Display a placeholder image
+                                st.image("https://cdn-icons-png.flaticon.com/512/337/337946.png", width=100, caption="PDF Document")
+                        else:
+                            # For URL-based PDFs or if extraction failed
+                            st.warning("PDF preview is not available for this document. Please download the file to view it.")
+                            if not preview_src.startswith("data:"):
+                                st.markdown(f"<p>PDF URL: <a href='{preview_src}' target='_blank'>Open PDF</a></p>", unsafe_allow_html=True)
+                            # Display a placeholder image
+                            st.image("https://cdn-icons-png.flaticon.com/512/337/337946.png", width=100, caption="PDF Document")
                     else:
+                        # For images, continue using st.image
                         st.image(preview_src, use_column_width=True)
                 
                 with col2:
@@ -485,7 +591,7 @@ Answer questions based ONLY on the information in the document. If the answer is
                                         "content": assistant_response
                                     })
                                     
-                                    # UPDATED: Use st.rerun() instead of st.experimental_rerun()
+                                    # Use st.rerun() instead of st.experimental_rerun()
                                     st.rerun()
                                 
                                 except Exception as e:
@@ -496,7 +602,7 @@ Answer questions based ONLY on the information in the document. If the answer is
                     # Option to clear chat history
                     if st.button("Clear Chat History", key=f"clear_{qa_file_idx}"):
                         st.session_state.chat_history[doc_id] = []
-                        # UPDATED: Use st.rerun() instead of st.experimental_rerun()
+                        # Use st.rerun() instead of st.experimental_rerun()
                         st.rerun()
     
     except Exception as e:
