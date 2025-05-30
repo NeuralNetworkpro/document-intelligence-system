@@ -1,4 +1,7 @@
-streamlit
+streamlit>=1.26.0
 mistralai
 pymupdf
 pillow
+pandas
+numpy
+openpyxl  # For Excel functionality
