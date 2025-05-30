@@ -1,4 +1,4 @@
-# Updated questions based on analysis of the 24 OCR documents for FLAVOUR ORANGE T2N SC355570
+# Updated questions based on analysis of the 24 OCR documents for FLAVOUR ORANGE 
 
 # NUTRIENT_QUESTIONS - Based on actual nutritional data found in Document 14
 NUTRIENT_QUESTIONS = [
@@ -113,5 +113,3 @@ REGULATORY_QUESTIONS = [
     "Does the ingredient meet Indonesian BPOM regulations? (Yes/No)",
     "Is the ingredient approved for food use in target markets? (Yes/No)"
 ]
-
-
