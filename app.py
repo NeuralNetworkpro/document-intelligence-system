@@ -33,6 +33,9 @@ from updated_questions import (
     REGULATORY_QUESTIONS
 )
 
+# Import the new comparison functionality
+from comparison import render_comparison_tab
+
 # Try to import PyMuPDF for PDF preview
 try:
     import fitz  # PyMuPDF
@@ -40,12 +43,163 @@ try:
 except ImportError:
     PYMUPDF_AVAILABLE = False
 
+def estimate_tokens(text):
+    """Estimate the number of tokens in a text (rough approximation)"""
+    return len(text) / 4  # Rough estimate: ~4 characters per token
+
+def extract_relevant_sections(document_content, category, max_tokens=6000):
+    """Extract sections relevant to a specific category from document content"""
+    
+    # Category-specific keywords for better content filtering
+    category_keywords = {
+        "nutrient": [
+            "nutrient", "nutrition", "nutritional", "energy", "protein", "fat", "carbohydrate", 
+            "vitamin", "mineral", "kcal", "calorie", "sugar", "fiber", "fibre", "sodium", 
+            "calcium", "iron", "potassium", "saturated", "unsaturated", "trans", "cholesterol",
+            "ash", "moisture", "starch", "dietary fiber", "total fat", "monounsaturated",
+            "polyunsaturated", "vitamin a", "vitamin c", "vitamin d", "vitamin e", "thiamin",
+            "riboflavin", "niacin", "folate", "cobalamin", "mg/100g", "g/100g", "kj/100g",
+            "per 100g", "per serving", "nutritional value", "nutritional information"
+        ],
+        "dietary": [
+            "dietary", "halal", "kosher", "vegan", "vegetarian", "gluten", "lactose", 
+            "organic", "natural", "free range", "grass fed", "non-dairy", "plant-based",
+            "gluten-free", "lactose-free", "dairy-free", "egg-free", "nut-free", "soy-free",
+            "certified", "certification", "religious", "diet", "dietary restriction"
+        ],
+        "allergen": [
+            "allergen", "allergy", "allergic", "contain", "contains", "may contain", "trace", 
+            "peanut", "nut", "tree nut", "milk", "dairy", "egg", "soy", "soya", "wheat", 
+            "gluten", "fish", "shellfish", "crustacean", "mollusc", "celery", "mustard", 
+            "sesame", "lupin", "sulphite", "sulfite", "cross-contamination", "allergen information",
+            "allergy advice", "free from", "does not contain"
+        ],
+        "gmo": [
+            "gmo", "genetic", "genetically", "modified", "organism", "dna", "gene", "transgenic", 
+            "bioengineered", "biotechnology", "recombinant", "engineered", "modification",
+            "non-gmo", "gmo-free", "genetically modified organism", "genetic engineering"
+        ],
+        "safety": [
+            "safety", "heavy metal", "metals", "contaminant", "contamination", "residue", 
+            "pesticide", "herbicide", "toxin", "toxic", "pathogen", "irradiation", "radiation",
+            "lead", "mercury", "cadmium", "arsenic", "aflatoxin", "mycotoxin", "chemical",
+            "hazard", "risk", "limit", "maximum", "acceptable", "safe", "unsafe"
+        ],
+        "composition": [
+            "composition", "ingredient", "ingredients", "formulation", "component", "components",
+            "carrier", "additive", "additives", "preservative", "preservatives", "percentage", 
+            "percent", "%", "formula", "recipe", "constituent", "material", "substance",
+            "compound", "mixture", "blend", "preparation"
+        ],
+        "microbiological": [
+            "microbiological", "microbial", "microbe", "bacteria", "bacterial", "yeast", 
+            "mold", "mould", "fungi", "pathogen", "pathogenic", "shelf life", "storage", 
+            "temperature", "refrigeration", "freezing", "sterilization", "pasteurization",
+            "cfu", "colony", "count", "salmonella", "listeria", "e.coli", "staphylococcus",
+            "clostridium", "bacillus", "spoilage", "preservation"
+        ],
+        "regulatory": [
+            "regulatory", "regulation", "regulations", "compliance", "compliant", "standard", 
+            "standards", "requirement", "requirements", "certification", "certified", "approved", 
+            "approval", "eu", "european", "fda", "usda", "bpom", "codex", "iso", "haccp",
+            "brc", "ifs", "fssc", "legal", "law", "directive", "legislation", "authorized",
+            "permitted", "prohibited", "banned", "restricted"
+        ]
+    }
+    
+    # Get keywords for the specific category
+    keywords = category_keywords.get(category, [])
+    
+    # Split document into manageable chunks
+    chunks = document_content.split("\n\n=== DOCUMENT")
+    header = chunks[0] if chunks else ""
+    documents = ["=== DOCUMENT" + chunk for chunk in chunks[1:]] if len(chunks) > 1 else [document_content]
+    
+    relevant_sections = []
+    
+    # Always include header information (contains metadata)
+    if header.strip():
+        relevant_sections.append(header)
+    
+    # Process each document
+    for doc in documents:
+        doc_lines = doc.split('\n')
+        doc_header = doc_lines[0] if doc_lines else ""
+        
+        # Calculate keyword density for this document
+        keyword_matches = 0
+        for keyword in keywords:
+            keyword_matches += doc.lower().count(keyword.lower())
+        
+        # If document has relevant keywords, include it
+        if keyword_matches > 0:
+            relevant_sections.append(doc)
+        else:
+            # Even if no direct keywords, include document header for context
+            relevant_sections.append(f"{doc_header}\n\n[Document analyzed but no explicit {category} keywords found]")
+    
+    # Combine relevant sections
+    combined_content = "\n\n".join(relevant_sections)
+    
+    # If still too large, prioritize sections with highest keyword density
+    if estimate_tokens(combined_content) > max_tokens:
+        # Score each section by keyword density
+        section_scores = []
+        for section in relevant_sections:
+            keyword_count = sum(section.lower().count(keyword.lower()) for keyword in keywords)
+            section_length = len(section)
+            # Calculate density (keywords per 1000 characters)
+            density = (keyword_count * 1000) / section_length if section_length > 0 else 0
+            section_scores.append((section, keyword_count, density))
+        
+        # Sort by keyword count first, then by density
+        section_scores.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        
+        # Take top sections until we're under the token limit
+        prioritized_sections = []
+        current_tokens = 0
+        
+        for section, count, density in section_scores:
+            section_tokens = estimate_tokens(section)
+            if current_tokens + section_tokens <= max_tokens:
+                prioritized_sections.append(section)
+                current_tokens += section_tokens
+            else:
+                # If we can't fit the whole section, try to fit part of it
+                remaining_tokens = max_tokens - current_tokens
+                if remaining_tokens > 100:  # Only if we have meaningful space left
+                    chars_to_include = int(remaining_tokens * 4)  # Convert tokens back to chars
+                    partial_section = section[:chars_to_include] + "\n[... content truncated ...]"
+                    prioritized_sections.append(partial_section)
+                break
+        
+        combined_content = "\n\n".join(prioritized_sections)
+    
+    return combined_content
+
 def create_analysis_prompt(document_content, questions, category):
-    """Create a specialized prompt for document analysis"""
+    """Create a specialized prompt for document analysis with enhanced instructions"""
+    
+    category_guidance = {
+        "nutrient": "Look for nutritional tables, energy values, protein content, fat content, carbohydrates, vitamins, minerals, and any numerical nutritional data. Pay special attention to tables with columns like 'Nutrient', 'Value', 'Unit' or similar structures.",
+        "dietary": "Look for dietary certifications, religious compliance (Halal, Kosher), dietary restrictions (Vegan, Vegetarian), and special dietary claims (Gluten-free, Organic, etc.).",
+        "allergen": "Look for allergen declarations, 'contains' statements, 'may contain' warnings, and any mention of the 14 major allergens or cross-contamination risks.",
+        "gmo": "Look for GMO status, genetic modification information, bioengineering details, and any statements about genetically modified organisms.",
+        "safety": "Look for safety data, contaminant levels, heavy metals, pesticide residues, toxicological information, and safety limits.",
+        "composition": "Look for ingredient lists, formulation details, component percentages, and compositional information.",
+        "microbiological": "Look for microbial specifications, shelf life data, storage conditions, pathogen testing, and microbiological safety information.",
+        "regulatory": "Look for regulatory compliance statements, certifications, standards compliance, and legal requirements."
+    }
+    
+    specific_guidance = category_guidance.get(category, f"Look for information related to {category}")
+    
     return f"""You are a specialized document analysis assistant focused on {category} information extraction.
 
 DOCUMENT CONTENT:
 {document_content}
+
+CATEGORY-SPECIFIC GUIDANCE:
+{specific_guidance}
 
 INSTRUCTIONS:
 1. Answer each question based ONLY on the information explicitly stated in the provided document(s)
@@ -54,13 +208,18 @@ INSTRUCTIONS:
 4. For each answer, provide the source reference (document name/section where the information was found)
 5. Be precise and extract exact values/information as stated in the document
 6. For Yes/No questions, only answer Yes if explicitly confirmed in the document, otherwise answer No or Unknown
+7. IMPORTANT: Look for both direct and indirect information that could answer the questions
+8. Be thorough - even if information is presented in tables, charts, or scattered across the document
+9. For {category} questions specifically, look for related terms and synonyms
+10. Pay special attention to numerical data, tables, and structured information
+11. If you find partial information that relates to a question, include it in your answer
 
 QUESTIONS TO ANALYZE:
 {chr(10).join([f"{i+1}. {q}" for i, q in enumerate(questions)])}
 
 Please provide answers in the following format:
 Question: [Question text]
-Answer: [Your answer based on document content]
+Answer: [Your answer based on document content - be specific and include exact values when available]
 Source: [Document name/section where information was found]
 ---
 
@@ -69,56 +228,89 @@ Question: [Question text]
 Answer: No data available to answer this question
 Source: Information not found in provided documents
 ---
+
+IMPORTANT: Be thorough and look carefully through all the provided content. Even if information seems scattered or is in table format, extract and compile it to answer the questions.
 """
 
 def process_analysis_questions(client, document_content, questions, category, model):
-    """Process questions using RAG pipeline"""
+    """Process questions using RAG pipeline with improved handling of large documents"""
     try:
-        prompt = create_analysis_prompt(document_content, questions, category)
+        # Extract relevant sections for this category
+        focused_content = extract_relevant_sections(document_content, category, max_tokens=6000)
         
+        # Create enhanced prompt with category-specific guidance
+        enhanced_prompt = create_analysis_prompt(focused_content, questions, category)
+        
+        # Use appropriate temperature for thorough exploration
         response = client.chat.complete(
             model=model,
             messages=[
-                {"role": "system", "content": "You are a precise document analysis assistant. Extract information only from the provided documents."},
-                {"role": "user", "content": prompt}
-            ]
+                {
+                    "role": "system", 
+                    "content": f"You are a precise document analysis assistant specializing in {category} information extraction. Extract information only from the provided documents. Be thorough and look for both direct and indirect information. Pay special attention to tables, numerical data, and structured information."
+                },
+                {"role": "user", "content": enhanced_prompt}
+            ],
+            temperature=0.7,  # Slightly higher temperature for more exploration
+            max_tokens=2000   # Ensure we have enough tokens for comprehensive answers
         )
         
         return response.choices[0].message.content
     except Exception as e:
         return f"Error processing {category} analysis: {str(e)}"
 
-def parse_analysis_results(analysis_text):
-    """Parse the analysis results into structured format"""
-    results = []
-    sections = analysis_text.split("---")
-
-    for section in sections:
-        if section.strip():
-            lines = section.strip().split("\n")
-            question = ""
-            answer = ""
-            source = ""
-            
-            for line in lines:
-                if line.startswith("Question:"):
-                    question = line.replace("Question:", "").strip()
-                elif line.startswith("Answer:"):
-                    answer = line.replace("Answer:", "").strip()
-                elif line.startswith("Source:"):
-                    source = line.replace("Source:", "").strip()
-            
-            if question and answer:
-                results.append({
-                    "question": question,
-                    "answer": answer,
-                    "source": source
-                })
-
-    return results
+def prioritize_categories(document_content, categories):
+    """Prioritize categories based on document content relevance"""
+    
+    category_keywords = {
+        "nutrient": [
+            "nutrient", "nutrition", "energy", "protein", "fat", "carbohydrate", 
+            "vitamin", "mineral", "kcal", "calorie", "sugar", "fiber", "sodium"
+        ],
+        "dietary": [
+            "dietary", "halal", "kosher", "vegan", "vegetarian", "gluten", 
+            "lactose", "organic", "natural"
+        ],
+        "allergen": [
+            "allergen", "allergy", "contain", "may contain", "trace", "peanut", 
+            "nut", "milk", "egg", "soy", "wheat", "fish", "shellfish"
+        ],
+        "gmo": [
+            "gmo", "genetic", "modified", "organism", "dna", "gene", "transgenic", 
+            "bioengineered", "biotechnology"
+        ],
+        "safety": [
+            "safety", "heavy metal", "contaminant", "residue", "pesticide", 
+            "toxin", "pathogen", "irradiation", "radiation"
+        ],
+        "composition": [
+            "composition", "ingredient", "formulation", "component", 
+            "carrier", "additive", "preservative", "percentage"
+        ],
+        "microbiological": [
+            "microbiological", "microbial", "bacteria", "yeast", "mold", 
+            "pathogen", "shelf life", "storage", "temperature"
+        ],
+        "regulatory": [
+            "regulatory", "regulation", "compliance", "standard", "requirement", 
+            "certification", "approved", "eu", "fda", "usda", "bpom"
+        ]
+    }
+    
+    # Score each category based on keyword presence
+    category_scores = {}
+    for category in categories:
+        keywords = category_keywords.get(category, [])
+        score = sum(document_content.lower().count(keyword.lower()) for keyword in keywords)
+        category_scores[category] = score
+    
+    # Sort categories by score (descending) - highest relevance first
+    sorted_categories = sorted(categories, key=lambda x: category_scores[x], reverse=True)
+    
+    return sorted_categories
 
 def run_comprehensive_analysis(client, rag_model):
-    """Run comprehensive analysis on all processed documents"""
+    """Run comprehensive analysis on all processed documents with improved handling"""
     if not st.session_state.ocr_results:
         st.error("No documents to analyze. Please process documents first.")
         return False
@@ -129,7 +321,15 @@ def run_comprehensive_analysis(client, rag_model):
         file_name = st.session_state.file_names[idx]
         combined_content += f"\n\n=== DOCUMENT {idx+1}: {file_name} ===\n\n{result}\n\n"
     
-    # Run analysis for each category
+    # Show document content statistics
+    total_chars = len(combined_content)
+    estimated_tokens = estimate_tokens(combined_content)
+    st.info(f"📊 **Document Statistics:**\n"
+           f"• Total characters: {total_chars:,}\n"
+           f"• Estimated tokens: {estimated_tokens:,.0f}\n"
+           f"• Documents: {len(st.session_state.ocr_results)}")
+    
+    # Define categories and questions
     categories = {
         "nutrient": NUTRIENT_QUESTIONS,
         "dietary": DIETARY_QUESTIONS,
@@ -141,47 +341,249 @@ def run_comprehensive_analysis(client, rag_model):
         "regulatory": REGULATORY_QUESTIONS
     }
     
+    # Prioritize categories based on document content
+    category_order = prioritize_categories(combined_content, categories.keys())
+    
+    st.info(f"🎯 **Category Processing Order (by relevance):**\n" + 
+           "\n".join([f"• {i+1}. {cat.title()}" for i, cat in enumerate(category_order)]))
+    
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     total_categories = len(categories)
     
-    for idx, (category, questions) in enumerate(categories.items()):
+    # Process categories in order of relevance
+    for idx, category in enumerate(category_order):
+        questions = categories[category]
         try:
             progress = (idx + 1) / total_categories
             progress_bar.progress(progress)
             status_text.text(f"🔍 Analyzing {category.title()} information... ({idx+1}/{total_categories})")
             
+            # Show processing info
+            st.info(f"🔄 Processing **{category.title()}** category with **{len(questions)}** questions...")
+            
+            # Process the analysis
             analysis_result = process_analysis_questions(
                 client, combined_content, questions, category, rag_model
             )
+            
+            # Add debug info to help track processing
+            # with st.expander(f"🔍 Debug: Raw {category.title()} Response", expanded=False):
+            #     st.text_area(
+            #         f"Raw response for {category}:",
+            #         analysis_result,
+            #         height=200,
+            #         key=f"debug_{category}"
+            #     )
+            
+            # Parse the results
             parsed_results = parse_analysis_results(analysis_result)
             
+            # Store results and show status
             if parsed_results:
-                st.session_state["analysis_results"][category] = parsed_results
-                st.success(f"✅ {category.title()} analysis completed! ({len(parsed_results)} results)")
+                st.session_state.analysis_results[category] = parsed_results
+                answered_questions = len([r for r in parsed_results if "No data available" not in r.get('answer', '')])
+                st.success(f"✅ **{category.title()}** analysis completed! "
+                          f"({len(parsed_results)} total results, {answered_questions} with data)")
             else:
-                st.warning(f"⚠️ {category.title()} analysis returned no results")
-                st.session_state["analysis_results"][category] = []
+                st.warning(f"⚠️ **{category.title()}** analysis returned no structured results")
+                st.session_state.analysis_results[category] = []
             
+            # Brief pause between categories
             time.sleep(1)
+            
         except Exception as e:
-            st.session_state["analysis_results"][category] = []
-            st.error(f"Error analyzing {category}: {str(e)}")
+            st.session_state.analysis_results[category] = []
+            st.error(f"❌ Error analyzing **{category}**: {str(e)}")
     
+    # Final summary
     progress_bar.progress(1.0)
     status_text.text("✅ Complete analysis finished!")
+    
+    # Calculate and display final statistics
     total_results = sum(len(results) for results in st.session_state.analysis_results.values())
-    st.info(f"📊 Analysis complete! Total results: {total_results}")
+    answered_results = 0
     
-    # Mark analysis as completed using dictionary notation
-    st.session_state["analysis_completed"] = True
+    for category, results in st.session_state.analysis_results.items():
+        answered_count = len([r for r in results if "No data available" not in r.get('answer', '')])
+        answered_results += answered_count
     
-    time.sleep(1)
+    st.success(f"🎉 **Analysis Complete!**\n"
+              f"• Total questions processed: {total_results}\n"
+              f"• Questions with answers: {answered_results}\n"
+              f"• Success rate: {(answered_results/total_results*100):.1f}%" if total_results > 0 else "")
+    
+    # Show category-wise summary
+    st.markdown("### 📊 Category Analysis Summary")
+    for category in category_order:
+        results = st.session_state.analysis_results.get(category, [])
+        answered_count = len([r for r in results if "No data available" not in r.get('answer', '')])
+        total_count = len(results)
+        
+        if answered_count > 0:
+            st.markdown(f"✅ **{category.title()}**: {answered_count}/{total_count} questions answered")
+        else:
+            st.markdown(f"❌ **{category.title()}**: {answered_count}/{total_count} questions answered")
+    
+    # Mark analysis as completed
+    st.session_state.analysis_completed = True
+    
+    # Clean up UI
+    time.sleep(2)
     progress_bar.empty()
     status_text.empty()
     
     return True
+
+def parse_analysis_results(analysis_text):
+    """Parse the analysis results into structured format with improved handling of multiple formats"""
+    results = []
+    
+    # Clean up the text first
+    analysis_text = analysis_text.strip()
+    
+    # Try to split by different separators
+    sections = []
+    
+    # Method 1: Split by --- separators
+    if "---" in analysis_text:
+        sections = analysis_text.split("---")
+    else:
+        # Method 2: Split by question patterns if no --- separators
+        import re
+        # Look for question patterns (both with and without asterisks)
+        question_pattern = r'(?:\*\*Question[:\s]*\*\*|Question[:\s]*)'
+        parts = re.split(question_pattern, analysis_text, flags=re.IGNORECASE)
+        
+        # Remove empty first part if it exists
+        if parts and not parts[0].strip():
+            parts = parts[1:]
+        
+        # Reconstruct sections with Question prefix
+        sections = []
+        for part in parts:
+            if part.strip():
+                sections.append("Question: " + part.strip())
+    
+    # Process each section
+    for section in sections:
+        if not section.strip():
+            continue
+            
+        # Clean the section
+        section = section.strip()
+        
+        # Initialize variables
+        question = ""
+        answer = ""
+        source = ""
+        
+        # Split into lines for processing
+        lines = [line.strip() for line in section.split('\n') if line.strip()]
+        
+        current_field = None
+        
+        for line in lines:
+            # Handle different question formats
+            if (line.startswith("**Question") or 
+                line.startswith("Question:") or 
+                line.startswith("Question ")):
+                
+                # Extract question text
+                if "**Question" in line:
+                    # Handle **Question:** format
+                    question_text = line.split("**", 2)[-1] if "**" in line else line
+                    question_text = question_text.replace("Question:", "").strip()
+                else:
+                    # Handle Question: format
+                    question_text = line.replace("Question:", "").strip()
+                
+                question = question_text
+                current_field = "question"
+                
+            elif (line.startswith("**Answer") or 
+                  line.startswith("Answer:") or 
+                  line.startswith("Answer ")):
+                
+                # Extract answer text
+                if "**Answer" in line:
+                    # Handle **Answer:** format
+                    answer_text = line.split("**", 2)[-1] if "**" in line else line
+                    answer_text = answer_text.replace("Answer:", "").strip()
+                else:
+                    # Handle Answer: format
+                    answer_text = line.replace("Answer:", "").strip()
+                
+                answer = answer_text
+                current_field = "answer"
+                
+            elif (line.startswith("**Source") or 
+                  line.startswith("Source:") or 
+                  line.startswith("Source ")):
+                
+                # Extract source text
+                if "**Source" in line:
+                    # Handle **Source:** format
+                    source_text = line.split("**", 2)[-1] if "**" in line else line
+                    source_text = source_text.replace("Source:", "").strip()
+                else:
+                    # Handle Source: format
+                    source_text = line.replace("Source:", "").strip()
+                
+                source = source_text
+                current_field = "source"
+                
+            else:
+                # Handle continuation lines
+                if current_field == "question" and question:
+                    question += " " + line
+                elif current_field == "answer" and answer:
+                    answer += " " + line
+                elif current_field == "source" and source:
+                    source += " " + line
+        
+        # Clean up the extracted text
+        question = question.strip()
+        answer = answer.strip()
+        source = source.strip()
+        
+        # Only add if we have at least a question and answer
+        if question and answer:
+            results.append({
+                "question": question,
+                "answer": answer,
+                "source": source if source else "Source not specified"
+            })
+    
+    # If we still don't have results, try a more aggressive parsing approach
+    if not results:
+        # Look for any text that looks like Q&A pairs
+        import re
+        
+        # Pattern to find question-answer pairs
+        qa_pattern = r'(?:Question[:\s]*(?:\d+[:\.]?)?\s*)(.*?)(?:Answer[:\s]*)(.*?)(?:Source[:\s]*)(.*?)(?=Question|$)'
+        matches = re.findall(qa_pattern, analysis_text, re.DOTALL | re.IGNORECASE)
+        
+        for match in matches:
+            if len(match) >= 2:
+                question = match[0].strip()
+                answer = match[1].strip()
+                source = match[2].strip() if len(match) > 2 else "Source not specified"
+                
+                # Clean up asterisks and formatting
+                question = re.sub(r'\*+', '', question).strip()
+                answer = re.sub(r'\*+', '', answer).strip()
+                source = re.sub(r'\*+', '', source).strip()
+                
+                if question and answer:
+                    results.append({
+                        "question": question,
+                        "answer": answer,
+                        "source": source if source else "Source not specified"
+                    })
+    
+    return results
 
 def display_all_questions_with_results(questions, results, category_name):
     """Display all questions for a category, showing results if available"""
@@ -200,9 +602,18 @@ def display_all_questions_with_results(questions, results, category_name):
         for i, result in enumerate(results):
             result_by_index[i] = result
 
+    # Display summary statistics
+    answered_count = len([r for r in results if "No data available" not in r.get('answer', '')]) if results else 0
+    total_count = len(questions)
+    
+    if answered_count > 0:
+        st.success(f"📊 **Analysis Summary**: {answered_count}/{total_count} questions answered ({(answered_count/total_count*100):.1f}% success rate)")
+    else:
+        st.warning(f"📊 **Analysis Summary**: {answered_count}/{total_count} questions answered")
+
     # Display all questions
     for i, question in enumerate(questions, 1):
-        with st.expander(f"Q{i}: {question[:60]}..." if len(question) > 60 else f"Q{i}: {question}", expanded=False):
+        with st.expander(f"Q{i}: {question[:80]}..." if len(question) > 80 else f"Q{i}: {question}", expanded=False):
             st.markdown(f"**Question:** {question}")
             
             # Try multiple matching strategies
@@ -229,11 +640,11 @@ def display_all_questions_with_results(questions, results, category_name):
                 answer = result['answer']
                 
                 # Color code the answer based on content
-                if "No data available" in answer:
+                if "No data available" in answer or "not found" in answer.lower():
                     st.markdown(f"**Answer:** :red[{answer}]")
-                elif any(word in answer.lower() for word in ['yes', 'present', 'contains', 'certified']):
+                elif any(word in answer.lower() for word in ['yes', 'present', 'contains', 'certified', 'compliant']):
                     st.markdown(f"**Answer:** :green[{answer}]")
-                elif any(word in answer.lower() for word in ['no', 'free', 'not present', 'does not contain']):
+                elif any(word in answer.lower() for word in ['no', 'free', 'not present', 'does not contain', 'absent']):
                     st.markdown(f"**Answer:** :blue[{answer}]")
                 else:
                     st.markdown(f"**Answer:** {answer}")
@@ -242,6 +653,8 @@ def display_all_questions_with_results(questions, results, category_name):
             else:
                 st.markdown("**Answer:** :orange[No specific analysis found for this question]")
                 st.markdown("**Source:** :orange[Question not processed in current analysis]")
+
+# [REST OF THE CODE REMAINS THE SAME - keeping all other functions unchanged]
 
 def get_logo_base64():
     """Load and encode the logo"""
@@ -254,7 +667,7 @@ def get_logo_base64():
     return None
 
 def render_pdf_preview_scrollable(pdf_bytes, max_pages=10, page_width=600):
-    """Render PDF pages as images for scrollable view - WORKING VERSION FROM EARLIER CODE"""
+    """Render PDF pages as images for scrollable view - FIXED VERSION"""
     if not PYMUPDF_AVAILABLE:
         return None, 0
 
@@ -497,32 +910,6 @@ st.markdown("""
     height: auto;
 }
 
-/* Status bars */
-.pdf-info-bar {
-    background: linear-gradient(135deg, #dbeafe, #bfdbfe);
-    border: 1px solid #93c5fd;
-    border-radius: 10px;
-    padding: 15px;
-    margin-bottom: 20px;
-    text-align: center;
-    color: #1e40af;
-    font-weight: 600;
-    box-shadow: 0 2px 6px rgba(59, 130, 246, 0.15);
-}
-
-.page-number-badge {
-    background: linear-gradient(135deg, #4F8BF9, #3670CC);
-    color: white;
-    padding: 10px 24px;
-    border-radius: 30px;
-    font-weight: bold;
-    margin-bottom: 20px;
-    display: inline-block;
-    font-size: 1rem;
-    box-shadow: 0 3px 6px rgba(79, 139, 249, 0.3);
-    text-align: center;
-}
-
 /* Results header */
 .results-header {
     display: flex;
@@ -576,6 +963,7 @@ div[data-testid="column"] .stButton > button {
 }
 
 div[data-testid="column"] .stButton > button[kind="primary"] {
+    border: none !important;
     background: linear-gradient(135deg, #4F8BF9, #3670CC) !important;
     color: white !important;
     font-weight: 700 !important;
@@ -621,6 +1009,32 @@ div[data-testid="column"] .stButton > button[kind="primary"] {
     margin: 1rem 0;
     text-align: center;
 }
+
+/* PDF info styling */
+.pdf-info-bar {
+    background: linear-gradient(135deg, #dbeafe, #bfdbfe);
+    border: 1px solid #93c5fd;
+    border-radius: 10px;
+    padding: 15px;
+    margin-bottom: 20px;
+    text-align: center;
+    color: #1e40af;
+    font-weight: 600;
+    box-shadow: 0 2px 6px rgba(59, 130, 246, 0.15);
+}
+
+.page-number-badge {
+    background: linear-gradient(135deg, #4F8BF9, #3670CC);
+    color: white;
+    padding: 10px 24px;
+    border-radius: 30px;
+    font-weight: bold;
+    margin-bottom: 20px;
+    display: inline-block;
+    font-size: 1rem;
+    box-shadow: 0 3px 6px rgba(79, 139, 249, 0.3);
+    text-align: center;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -632,7 +1046,7 @@ if logo_base64:
         <div class="logo-container">
             <div>
                 <h1 class='main-header'>Document Intelligence System</h1>
-                <p style="font-size: 1.1rem; color: #64748b; margin: 0;">Fast OCR Processing with On-Demand Analysis</p>
+                <p style="font-size: 1.1rem; color: #64748b; margin: 0;">Extract, analyze, and query documents using advanced OCR and RAG capabilities</p>
             </div>
             <img src="data:image/svg+xml;base64,{logo_base64}" class="logo-img">
         </div>
@@ -641,38 +1055,35 @@ if logo_base64:
     )
 else:
     st.markdown("<h1 class='main-header'>Document Intelligence System</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='font-size: 1.1rem; color: #64748b;'>Fast OCR Processing with On-Demand Analysis</p>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size: 1.1rem; color: #64748b;'>Extract, analyze, and query documents using advanced OCR and RAG capabilities</p>", unsafe_allow_html=True)
 
-# Initialize session state with dictionary notation for Streamlit deployment
+# Initialize session state
 if "ocr_results" not in st.session_state:
-    st.session_state["ocr_results"] = []
+    st.session_state.ocr_results = []
 if "preview_sources" not in st.session_state:
-    st.session_state["preview_sources"] = []
+    st.session_state.preview_sources = []
 if "file_names" not in st.session_state:
-    st.session_state["file_names"] = []
+    st.session_state.file_names = []
 if "pdf_bytes" not in st.session_state:
-    st.session_state["pdf_bytes"] = []
+    st.session_state.pdf_bytes = []
 if "image_bytes" not in st.session_state:
-    st.session_state["image_bytes"] = []
+    st.session_state.image_bytes = []
 if "chat_history" not in st.session_state:
-    st.session_state["chat_history"] = {}
+    st.session_state.chat_history = {}
 if "processing_complete" not in st.session_state:
-    st.session_state["processing_complete"] = False
+    st.session_state.processing_complete = False
 if "active_tab" not in st.session_state:
-    st.session_state["active_tab"] = "document"
+    st.session_state.active_tab = "document"
 if "active_summary_tab" not in st.session_state:
-    st.session_state["active_summary_tab"] = "overview"
+    st.session_state.active_summary_tab = "overview"
 if "analysis_results" not in st.session_state:
-    st.session_state["analysis_results"] = {}
+    st.session_state.analysis_results = {}
 if "analysis_completed" not in st.session_state:
-    st.session_state["analysis_completed"] = False
-# Excel generation session state
-if "excel_generation_complete" not in st.session_state:
-    st.session_state["excel_generation_complete"] = False
-if "excel_data" not in st.session_state:
-    st.session_state["excel_data"] = None
-if "excel_filename" not in st.session_state:
-    st.session_state["excel_filename"] = None
+    st.session_state.analysis_completed = False
+# Add session state for the new comparison feature
+if "comparison_results" not in st.session_state:
+    st.session_state.comparison_results = None
+
 
 # CLEANED UP Sidebar configuration - Removed unwanted elements
 with st.sidebar:
@@ -708,21 +1119,6 @@ if not api_key:
 
 # Enhanced Input section
 st.markdown("## 📁 Document Input")
-
-# Feature highlight - Updated
-st.markdown("""
-<div class="feature-highlight">
-    <h4>⚡ Optimized Processing Workflow</h4>
-    <p><strong>New faster approach:</strong></p>
-    <ul>
-        <li>🚀 <strong>Fast OCR processing</strong> - see results immediately</li>
-        <li>📊 <strong>On-demand analysis</strong> - runs only when Summary tab is clicked</li>
-        <li>⏱️ <strong>Time-saving</strong> - no waiting for analysis during document processing</li>
-        <li>🎯 <strong>User choice</strong> - analyze only when needed</li>
-        <li>📄 <strong>Quick document review</strong> - immediate access to extracted text</li>
-    </ul>
-</div>
-""", unsafe_allow_html=True)
 
 input_url = ""
 uploaded_files = []
@@ -766,19 +1162,16 @@ if process_button:
             st.error(f"Error initializing Mistral client: {str(e)}")
             st.stop()
         
-        # Clear previous results using dictionary notation
-        st.session_state["ocr_results"] = []
-        st.session_state["preview_sources"] = []
-        st.session_state["file_names"] = []
-        st.session_state["pdf_bytes"] = []
-        st.session_state["image_bytes"] = []
-        st.session_state["chat_history"] = {}
-        st.session_state["analysis_results"] = {}
-        st.session_state["analysis_completed"] = False
-        # Reset Excel generation state
-        st.session_state["excel_generation_complete"] = False
-        st.session_state["excel_data"] = None
-        st.session_state["excel_filename"] = None
+        # Clear previous results
+        st.session_state.ocr_results = []
+        st.session_state.preview_sources = []
+        st.session_state.file_names = []
+        st.session_state.pdf_bytes = []
+        st.session_state.image_bytes = []
+        st.session_state.chat_history = {}
+        st.session_state.analysis_results = {}
+        st.session_state.analysis_completed = False  # Reset analysis status
+        st.session_state.comparison_results = None # Reset comparison results
         
         # Prepare sources
         sources = input_url.split("\n") if source_type == "URL" else uploaded_files
@@ -851,40 +1244,40 @@ if process_button:
                 pages = ocr_response.pages if hasattr(ocr_response, "pages") else []
                 result_text = "\n\n".join(page.markdown for page in pages) if pages else "No text extracted."
                 
-                # Store results using dictionary notation
-                st.session_state["ocr_results"].append(result_text)
-                st.session_state["preview_sources"].append(preview_src)
-                st.session_state["file_names"].append(source_name if source_type == "URL" else source.name)
+                # Store results
+                st.session_state.ocr_results.append(result_text)
+                st.session_state.preview_sources.append(preview_src)
+                st.session_state.file_names.append(source_name if source_type == "URL" else source.name)
                 
                 if file_type == "PDF":
-                    st.session_state["pdf_bytes"].append(pdf_bytes)
-                    st.session_state["image_bytes"].append(None)
+                    st.session_state.pdf_bytes.append(pdf_bytes)
+                    st.session_state.image_bytes.append(None)
                 else:
-                    st.session_state["pdf_bytes"].append(None)
-                    st.session_state["image_bytes"].append(image_bytes)
+                    st.session_state.pdf_bytes.append(None)
+                    st.session_state.image_bytes.append(image_bytes)
                 
                 # Initialize chat history
                 doc_id = str(uuid.uuid4())
-                st.session_state["chat_history"][doc_id] = []
+                st.session_state.chat_history[doc_id] = []
                 
             except Exception as e:
                 st.error(f"Error processing {source_name}: {str(e)}")
                 # Add empty entries to maintain consistency
-                st.session_state["ocr_results"].append(f"Error processing document: {str(e)}")
-                st.session_state["preview_sources"].append("")
-                st.session_state["file_names"].append(source_name if source_type == "URL" else source.name)
-                st.session_state["pdf_bytes"].append(None)
-                st.session_state["image_bytes"].append(None)
+                st.session_state.ocr_results.append(f"Error processing document: {str(e)}")
+                st.session_state.preview_sources.append("")
+                st.session_state.file_names.append(source_name if source_type == "URL" else source.name)
+                st.session_state.pdf_bytes.append(None)
+                st.session_state.image_bytes.append(None)
                 doc_id = str(uuid.uuid4())
-                st.session_state["chat_history"][doc_id] = []
+                st.session_state.chat_history[doc_id] = []
         
         progress_bar.progress(1.0)
         status_text.text("✅ OCR Processing complete!")
-        st.session_state["processing_complete"] = True
+        st.session_state.processing_complete = True
         
         # Show completion message with next steps
         st.success("🎉 Document processing completed successfully!")
-        st.info("💡 **Next Steps:**\n• View extracted text in **Document View** tab\n• Ask questions in **Question Answering** tab\n• Run detailed analysis in **Summary** tab\n• Generate Excel reports in **Excel Export** tab")
+        st.info("💡 **Next Steps:**\n• View extracted text in **Document View** tab\n• Ask questions in **Question Answering** tab\n• Run detailed analysis in **Summary** tab\n• Generate Excel reports in **Excel Export** tab\n• Compare documents in the **Comparison** tab")
         
         time.sleep(2)
         progress_bar.empty()
@@ -903,7 +1296,7 @@ if st.session_state.ocr_results:
     # Tab Navigation
     st.markdown('<div class="custom-tabs-container">', unsafe_allow_html=True)
 
-    col1, col2, col3, col4, col_spacer = st.columns([1, 1, 1, 1, 2])
+    col1, col2, col3, col4, col5 = st.columns(5)
 
     with col1:
         doc_button_type = "primary" if st.session_state.active_tab == "document" else "secondary"
@@ -911,7 +1304,7 @@ if st.session_state.ocr_results:
                     key="tab_document",
                     use_container_width=True,
                     type=doc_button_type):
-            st.session_state["active_tab"] = "document"
+            st.session_state.active_tab = "document"
             st.rerun()
 
     with col2:
@@ -920,7 +1313,7 @@ if st.session_state.ocr_results:
                     key="tab_qa",
                     use_container_width=True,
                     type=qa_button_type):
-            st.session_state["active_tab"] = "qa"
+            st.session_state.active_tab = "qa"
             st.rerun()
 
     with col3:
@@ -929,7 +1322,7 @@ if st.session_state.ocr_results:
                     key="tab_summary",
                     use_container_width=True,
                     type=summary_button_type):
-            st.session_state["active_tab"] = "summary"
+            st.session_state.active_tab = "summary"
             st.rerun()
 
     with col4:
@@ -938,8 +1331,18 @@ if st.session_state.ocr_results:
                     key="tab_tabular",
                     use_container_width=True,
                     type=tabular_button_type):
-            st.session_state["active_tab"] = "tabular"
+            st.session_state.active_tab = "tabular"
             st.rerun()
+
+    with col5:
+        comparison_button_type = "primary" if st.session_state.active_tab == "comparison" else "secondary"
+        if st.button("⚖️ Comparison", 
+                    key="tab_comparison",
+                    use_container_width=True,
+                    type=comparison_button_type):
+            st.session_state.active_tab = "comparison"
+            st.rerun()
+
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -947,6 +1350,7 @@ if st.session_state.ocr_results:
     if st.session_state.active_tab == "document":
         st.markdown("### 📄 Document Processing Results")
         
+        # Display each document
         for idx, result in enumerate(st.session_state.ocr_results):
             with st.expander(f"📄 Document {idx+1}: {st.session_state.file_names[idx]}", expanded=idx==0):
                 col1, col2 = st.columns([1, 1])
@@ -955,8 +1359,10 @@ if st.session_state.ocr_results:
                     st.markdown("#### 🖼️ Document Preview")
                     
                     if file_type == "PDF":
+                        # Handle PDF preview with scrollable container
                         pdf_bytes = st.session_state.pdf_bytes[idx]
                         if pdf_bytes:
+                            # Download button
                             st.download_button(
                                 label="📥 Download PDF",
                                 data=pdf_bytes,
@@ -965,13 +1371,17 @@ if st.session_state.ocr_results:
                                 key=f"download_pdf_{idx}"
                             )
                             
+                            # Render PDF preview using native Streamlit components
                             if PYMUPDF_AVAILABLE:
                                 with st.spinner("Rendering PDF preview..."):
                                     page_images, total_pages = render_pdf_preview_scrollable(
-                                        pdf_bytes, max_pdf_pages, pdf_page_width
+                                        pdf_bytes, 
+                                        max_pdf_pages, 
+                                        pdf_page_width
                                     )
                                     
                                     if page_images:
+                                        # PDF info bar
                                         pages_shown = len(page_images)
                                         st.markdown(
                                             f"""
@@ -983,30 +1393,45 @@ if st.session_state.ocr_results:
                                             unsafe_allow_html=True
                                         )
                                         
-                                        # FIXED: Use native Streamlit components instead of HTML
+                                        # Create a scrollable container using HTML with enhanced styling
+                                        pdf_content = ""
                                         for page_data in page_images:
-                                            # Display page number badge using markdown
-                                            st.markdown(f"<div class='page-number-badge'>Page {page_data['page_num']}</div>", unsafe_allow_html=True)
+                                            # Convert image to base64 for HTML display
+                                            img_b64 = base64.b64encode(page_data['image']).decode()
                                             
-                                            # Display image using st.image (native Streamlit)
-                                            st.image(
-                                                page_data['image'], 
-                                                use_column_width=True,
-                                                caption=f"Page {page_data['page_num']} of {total_pages}"
-                                            )
+                                            pdf_content += f"""
+                                            <div style="margin-bottom: 30px; text-align: center;">
+                                                <div class="page-number-badge">Page {page_data['page_num']}</div>
+                                                <div style="text-align: center;">
+                                                    <img src="data:image/png;base64,{img_b64}" 
+                                                         style="max-width: 100%; height: auto; border: 2px solid #e2e8f0; border-radius: 12px; box-shadow: 0 4px 8px rgba(0,0,0,0.1);">
+                                                </div>
+                                            </div>
+                                            """
                                             
                                             # Add separator between pages (except for the last page)
                                             if page_data['page_num'] < len(page_images):
-                                                st.markdown("---")
+                                                pdf_content += "<div style='border-top: 2px solid #e2e8f0; margin: 25px 0; padding-top: 20px;'></div>"
+                                        
+                                        # Display the scrollable PDF container
+                                        st.markdown(f"<div class='pdf-preview-container'>{pdf_content}</div>", unsafe_allow_html=True)
+                                        
+                                        # Additional controls
+                                        if total_pages > max_pdf_pages:
+                                            st.info(f"💡 Tip: Increase 'Max PDF pages to render' in the sidebar to view more pages (currently showing {pages_shown}/{total_pages})")
                                     else:
                                         st.warning("Could not render PDF preview.")
                             else:
                                 st.info("Install PyMuPDF for PDF preview: `pip install pymupdf`")
+                                st.warning("PDF preview is not available. Please download the file to view it.")
                         else:
+                            # URL-based PDF
                             preview_src = st.session_state.preview_sources[idx]
                             if preview_src:
                                 st.markdown(f"[📎 Open PDF]({preview_src})")
+                                st.info("PDF preview is not available for URL-based documents. Click the link above to view.")
                     else:
+                        # Handle image preview
                         if source_type == "Local Upload" and st.session_state.image_bytes[idx]:
                             st.image(st.session_state.image_bytes[idx], use_column_width=True)
                         else:
@@ -1063,8 +1488,8 @@ if st.session_state.ocr_results:
         st.info(f"📊 **Summary:** {len(st.session_state.ocr_results)} documents - {total_chars:,} total characters extracted")
 
     elif st.session_state.active_tab == "tabular":
-        # Excel Export Tab with Fixed State Management
-        st.markdown("### 📊 Excel Export")
+        # Simplified Excel Export Tab - Direct Generation Only
+        # st.markdown("### 📊 Excel Export")
         
         if not st.session_state.ocr_results:
             st.warning("⚠️ No documents processed yet. Please process documents first.")
@@ -1077,37 +1502,34 @@ if st.session_state.ocr_results:
                 st.error("❌ Unable to initialize LLM client. Please check your API key.")
         
         if client:
+            # Simple Excel Generation Section
+            # st.markdown('<div class="excel-download-section">', unsafe_allow_html=True)
             st.markdown("### 📥 Generate Excel Report")
+            # st.markdown("Extract tabular data from all documents and create a professional Excel report.")
             
-            # Check if Excel generation is complete
-            if not st.session_state.get("excel_generation_complete", False):
-                # Show summary of what will be processed
-                st.markdown(f"""
-                **📋 Ready to Process:**
-                - 📄 **{len(st.session_state.ocr_results)} documents** will be analyzed
-                - 🤖 **AI-powered extraction** will find all tables and data
-                - 📊 **Professional Excel format** with proper formatting
-                - ⚡ **Fast processing** using optimized LLM approach
-                """)
-                
-                col1, col2, col3 = st.columns([1, 2, 1])
-                
-                with col2:
-                    if st.button("📊 Generate Excel Report", 
-                                key="generate_excel_simple", 
-                                use_container_width=True,
-                                type="primary"):
-                        
-                        # Show processing message
-                        processing_placeholder = st.empty()
-                        processing_placeholder.info("🔄 Extracting tabular data and creating Excel report...")
-                        
+            # Show summary of what will be processed
+            st.markdown(f"""
+            **📋 Ready to Process:**
+            - 📄 **{len(st.session_state.ocr_results)} documents** will be analyzed
+            - 🤖 **AI-powered extraction** will find all tables and data
+            - 📊 **Professional Excel format** with proper formatting
+            - ⚡ **Fast processing** using optimized LLM approach
+            """)
+            
+            col1, col2, col3 = st.columns([1, 2, 1])
+            
+            with col2:
+                if st.button("📊 Generate Excel Report", 
+                            key="generate_excel_simple", 
+                            use_container_width=True,
+                            type="primary"):
+                    
+                    with st.spinner("🔄 Extracting tabular data and creating Excel report..."):
                         try:
                             if not EXCEL_AVAILABLE:
-                                processing_placeholder.empty()
                                 st.error("❌ Excel functionality not available. Please install openpyxl: `pip install openpyxl`")
                             else:
-                                # Import the function
+                                # Import the new function
                                 from tabular import create_simple_excel_export
                                 
                                 excel_data = create_simple_excel_export(
@@ -1121,60 +1543,37 @@ if st.session_state.ocr_results:
                                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                                     filename = f"Tabular_Data_Report_{timestamp}.xlsx"
                                     
-                                    # Store in session state using dictionary notation
-                                    st.session_state["excel_data"] = excel_data
-                                    st.session_state["excel_filename"] = filename
-                                    st.session_state["excel_generation_complete"] = True
+                                    st.download_button(
+                                        label="📥 Download Excel Report",
+                                        data=excel_data,
+                                        file_name=filename,
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                        key="download_excel_simple",
+                                        use_container_width=True
+                                    )
                                     
-                                    processing_placeholder.empty()
-                                    st.rerun()
+                                    st.success("✅ Excel report generated successfully!")
+                                    
+                                    # Show what was included
+                                    file_size_mb = len(excel_data) / (1024 * 1024)
+                                    st.info(f"📊 File size: {file_size_mb:.2f} MB | Documents: {len(st.session_state.ocr_results)}")
+                                    
+                                    st.markdown("**✅ Report includes:**")
+                                    st.markdown("• All tabular data extracted using AI")
+                                    st.markdown("• Proper column headers and clean values")
+                                    st.markdown("• Document analysis and summaries")
+                                    st.markdown("• Professional Excel formatting")
+                                    st.markdown("• Individual sheets + consolidated summary")
                                     
                                 else:
-                                    processing_placeholder.empty()
                                     st.error("❌ No tabular data could be extracted from the documents")
                                     st.info("💡 Try uploading documents with clear table structures")
                                     
                         except Exception as e:
-                            processing_placeholder.empty()
                             st.error(f"❌ Error: {str(e)}")
                             st.info("💡 Make sure you have a valid API key and try again.")
             
-            else:
-                # Excel generation completed - show download
-                st.success("✅ Excel report generated successfully!")
-                
-                col1, col2, col3 = st.columns([1, 2, 1])
-                with col2:
-                    st.download_button(
-                        label="📥 Download Excel Report",
-                        data=st.session_state["excel_data"],
-                        file_name=st.session_state["excel_filename"],
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_excel_final",
-                        use_container_width=True
-                    )
-                
-                # Show what was included
-                file_size_mb = len(st.session_state["excel_data"]) / (1024 * 1024)
-                st.info(f"📊 File size: {file_size_mb:.2f} MB | Documents: {len(st.session_state.ocr_results)}")
-                
-                st.markdown("**✅ Report includes:**")
-                st.markdown("• All tabular data extracted using AI")
-                st.markdown("• Proper column headers and clean values")
-                st.markdown("• Document analysis and summaries")
-                st.markdown("• Professional Excel formatting")
-                st.markdown("• Individual sheets + consolidated summary")
-                
-                # Add option to generate new report
-                col1, col2, col3 = st.columns([3, 1, 1])
-                with col2:
-                    if st.button("🔄 Generate New Report", 
-                                key="regenerate_excel",
-                                use_container_width=True):
-                        st.session_state["excel_generation_complete"] = False
-                        st.session_state["excel_data"] = None
-                        st.session_state["excel_filename"] = None
-                        st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
 
     elif st.session_state.active_tab == "qa":
         st.markdown("### 💬 Question Answering")
@@ -1208,7 +1607,7 @@ if st.session_state.ocr_results:
         if is_all_documents:
             chat_key = "all_documents"
             if chat_key not in st.session_state.chat_history:
-                st.session_state["chat_history"][chat_key] = []
+                st.session_state.chat_history[chat_key] = []
             doc_id = chat_key
         else:
             if selected_doc < len(doc_ids):
@@ -1266,7 +1665,7 @@ if st.session_state.ocr_results:
 
             if submit_question and user_question.strip():
                 with st.spinner("🤔 Processing your question..."):
-                    st.session_state["chat_history"][doc_id].append({
+                    st.session_state.chat_history[doc_id].append({
                         "role": "user",
                         "content": user_question
                     })
@@ -1303,7 +1702,7 @@ You are currently analyzing {context_info}."""
                         )
 
                         assistant_response = chat_response.choices[0].message.content
-                        st.session_state["chat_history"][doc_id].append({
+                        st.session_state.chat_history[doc_id].append({
                             "role": "assistant",
                             "content": assistant_response
                         })
@@ -1321,7 +1720,7 @@ You are currently analyzing {context_info}."""
 
             if clear_history:
                 with st.spinner("🗑️ Clearing chat history..."):
-                    st.session_state["chat_history"][doc_id] = []
+                    st.session_state.chat_history[doc_id] = []
                     st.session_state[clear_input_flag] = True
                     st.success("🗑️ Chat history cleared!")
                     time.sleep(0.5)
@@ -1330,8 +1729,8 @@ You are currently analyzing {context_info}."""
     elif st.session_state.active_tab == "summary":
         st.markdown("### 📈 Summary & Analysis")
         
-        # Check if analysis has been completed using dictionary notation
-        if not st.session_state.get("analysis_completed", False):
+        # Check if analysis has been completed
+        if not st.session_state.analysis_completed:
             # Show analysis prompt
             st.markdown("""
             <div class="analysis-prompt">
@@ -1381,8 +1780,7 @@ You are currently analyzing {context_info}."""
             for i, (category, question_count, description) in enumerate(categories_info):
                 with col1 if i % 2 == 0 else col2:
                     st.markdown(f"""
-                    **{category}**  
-                    📊 {question_count}  
+                    **{category}** 📊 {question_count}  
                     💡 {description}
                     """)
         
@@ -1399,7 +1797,7 @@ You are currently analyzing {context_info}."""
                             key="summary_tab_overview",
                             use_container_width=True,
                             type=overview_button_type):
-                    st.session_state["active_summary_tab"] = "overview"
+                    st.session_state.active_summary_tab = "overview"
                     st.rerun()
             
             with col2:
@@ -1408,7 +1806,7 @@ You are currently analyzing {context_info}."""
                             key="summary_tab_nutrient",
                             use_container_width=True,
                             type=nutrient_button_type):
-                    st.session_state["active_summary_tab"] = "nutrient"
+                    st.session_state.active_summary_tab = "nutrient"
                     st.rerun()
             
             with col3:
@@ -1417,7 +1815,7 @@ You are currently analyzing {context_info}."""
                             key="summary_tab_dietary",
                             use_container_width=True,
                             type=dietary_button_type):
-                    st.session_state["active_summary_tab"] = "dietary"
+                    st.session_state.active_summary_tab = "dietary"
                     st.rerun()
             
             with col4:
@@ -1426,7 +1824,7 @@ You are currently analyzing {context_info}."""
                             key="summary_tab_allergen",
                             use_container_width=True,
                             type=allergen_button_type):
-                    st.session_state["active_summary_tab"] = "allergen"
+                    st.session_state.active_summary_tab = "allergen"
                     st.rerun()
             
             with col5:
@@ -1435,7 +1833,7 @@ You are currently analyzing {context_info}."""
                             key="summary_tab_gmo",
                             use_container_width=True,
                             type=gmo_button_type):
-                    st.session_state["active_summary_tab"] = "gmo"
+                    st.session_state.active_summary_tab = "gmo"
                     st.rerun()
             
             # Second row of category tabs
@@ -1447,7 +1845,7 @@ You are currently analyzing {context_info}."""
                             key="summary_tab_safety",
                             use_container_width=True,
                             type=safety_button_type):
-                    st.session_state["active_summary_tab"] = "safety"
+                    st.session_state.active_summary_tab = "safety"
                     st.rerun()
             
             with col2:
@@ -1456,7 +1854,7 @@ You are currently analyzing {context_info}."""
                             key="summary_tab_composition",
                             use_container_width=True,
                             type=composition_button_type):
-                    st.session_state["active_summary_tab"] = "composition"
+                    st.session_state.active_summary_tab = "composition"
                     st.rerun()
             
             with col3:
@@ -1465,7 +1863,7 @@ You are currently analyzing {context_info}."""
                             key="summary_tab_microbiological",
                             use_container_width=True,
                             type=micro_button_type):
-                    st.session_state["active_summary_tab"] = "microbiological"
+                    st.session_state.active_summary_tab = "microbiological"
                     st.rerun()
             
             # Third row for regulatory
@@ -1477,7 +1875,7 @@ You are currently analyzing {context_info}."""
                             key="summary_tab_regulatory",
                             use_container_width=True,
                             type=regulatory_button_type):
-                    st.session_state["active_summary_tab"] = "regulatory"
+                    st.session_state.active_summary_tab = "regulatory"
                     st.rerun()
             
             st.markdown('</div>', unsafe_allow_html=True)
@@ -1488,8 +1886,8 @@ You are currently analyzing {context_info}."""
                 if st.button("🔄 Re-run Analysis", 
                             key="rerun_analysis",
                             use_container_width=True):
-                    st.session_state["analysis_completed"] = False
-                    st.session_state["analysis_results"] = {}
+                    st.session_state.analysis_completed = False
+                    st.session_state.analysis_results = {}
                     st.rerun()
 
             if st.session_state.active_summary_tab == "overview":
@@ -1524,7 +1922,8 @@ You are currently analyzing {context_info}."""
                     for category in categories:
                         if category in st.session_state.analysis_results:
                             count = len(st.session_state.analysis_results[category])
-                            st.markdown(f"✅ {category.title()}: {count} questions analyzed")
+                            answered_count = len([r for r in st.session_state.analysis_results[category] if "No data available" not in r.get('answer', '')])
+                            st.markdown(f"✅ {category.title()}: {answered_count}/{count} questions answered")
                         else:
                             st.markdown(f"❌ {category.title()}: Not analyzed")
                 else:
@@ -1570,6 +1969,20 @@ You are currently analyzing {context_info}."""
                 results = st.session_state.analysis_results.get("regulatory", [])
                 display_all_questions_with_results(REGULATORY_QUESTIONS, results, "Regulatory Information")
 
+    elif st.session_state.active_tab == "comparison":
+        # This is where the new comparison tab will be rendered
+        try:
+            client = Mistral(api_key=api_key)
+            render_comparison_tab(
+                client, 
+                rag_model, 
+                st.session_state.ocr_results, 
+                st.session_state.file_names
+            )
+        except Exception as e:
+            st.error(f"Error initializing Mistral client for comparison: {e}")
+
+
 # Enhanced Footer
 st.markdown("---")
 logo_base64 = get_logo_base64()
@@ -1579,11 +1992,11 @@ if logo_base64:
         <footer style="background: linear-gradient(135deg, #f8fafc, #f1f5f9); padding: 30px; border-radius: 16px; margin-top: 40px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.05);">
             <img src="data:image/svg+xml;base64,{logo_base64}" style="width: 100px; height: auto; margin-bottom: 20px;">
             <p style="margin: 0; color: #1e293b; font-weight: bold; font-size: 1.1rem;">Document Intelligence System</p>
-            <p style="margin: 5px 0; font-size: 0.9rem; color: #64748b;">Fast OCR Processing with On-Demand Analysis</p>
+            <p style="margin: 5px 0; font-size: 0.9rem; color: #64748b;">Powered by Advanced OCR and RAG capabilities</p>
             <p style="margin: 0; font-size: 0.8rem; color: #94a3b8;">© 2025 EY. All rights reserved.</p>
         </footer>
         """,
         unsafe_allow_html=True
     )
 else:
-    st.markdown("<p style='text-align: center; color: #64748b;'>Document Intelligence System - Fast OCR Processing with On-Demand Analysis</p>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: #64748b;'>Document Intelligence System - Extract, analyze, and query documents using advanced OCR and RAG capabilities</p>", unsafe_allow_html=True)
