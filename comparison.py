@@ -194,7 +194,7 @@ def render_comparison_tab(client, rag_model, ocr_results, file_names):
     Renders the main Comparison tab, generating a detailed report table
     for each source document against the master file.
     """
-    st.markdown("### ⚖️ Document Compliance Verification")
+    st.markdown("### ⚖️ Document Comparison Verification")
     
     if not ocr_results:
         st.warning("Please process at least one document on the main page before running a comparison.")
@@ -207,7 +207,7 @@ def render_comparison_tab(client, rag_model, ocr_results, file_names):
         st.session_state.comparison_results = None
 
     if master_file:
-        if st.button("🚀 Run Compliance Verification", use_container_width=True, type="primary"):
+        if st.button("🚀 Run Comparison Verification", use_container_width=True, type="primary"):
             st.session_state.comparison_results = None
             
             # Store the bytes of the uploaded file in session state for later use
@@ -225,7 +225,7 @@ def render_comparison_tab(client, rag_model, ocr_results, file_names):
                 
                 if reports:
                     st.session_state.comparison_results = reports
-                    st.success("✅ Compliance Verification Report Generated!")
+                    st.success("✅ Comparison Verification Report Generated!")
                 else:
                     st.error("❌ Comparison failed. The AI could not generate any reports.")
 
@@ -233,7 +233,7 @@ def render_comparison_tab(client, rag_model, ocr_results, file_names):
         results = st.session_state.comparison_results
         
         st.markdown("---")
-        st.markdown("### 📊 At-a-Glance Summary")
+        st.markdown("### 📊 Glance Summary")
         
         summary_df = parse_report_to_summary_df(results)
         def style_status(status):
